@@ -20,7 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
 )
@@ -85,21 +85,22 @@ func mutatePodSpec(mutators map[string][]PodSpecMutatorFunc, name string, podSpe
 // addNodeSelectorToPodSpec makes Pod require to be scheduled on a node marked with the control-plane label
 func addNodeSelectorToPodSpec(podSpec *v1.PodSpec) {
 	if podSpec.NodeSelector == nil {
-		podSpec.NodeSelector = map[string]string{kubeadmconstants.LabelNodeRoleMaster: ""}
+		podSpec.NodeSelector = map[string]string{kubeadmconstants.LabelNodeRoleOldControlPlane: ""}
 		return
 	}
 
-	podSpec.NodeSelector[kubeadmconstants.LabelNodeRoleMaster] = ""
+	podSpec.NodeSelector[kubeadmconstants.LabelNodeRoleOldControlPlane] = ""
 }
 
 // setControlPlaneTolerationOnPodSpec makes the Pod tolerate the control-plane taint
 func setControlPlaneTolerationOnPodSpec(podSpec *v1.PodSpec) {
 	if podSpec.Tolerations == nil {
-		podSpec.Tolerations = []v1.Toleration{kubeadmconstants.ControlPlaneToleration}
+		// TODO: https://github.com/kubernetes/kubeadm/issues/2200
+		podSpec.Tolerations = []v1.Toleration{kubeadmconstants.OldControlPlaneToleration}
 		return
 	}
 
-	podSpec.Tolerations = append(podSpec.Tolerations, kubeadmconstants.ControlPlaneToleration)
+	podSpec.Tolerations = append(podSpec.Tolerations, kubeadmconstants.OldControlPlaneToleration)
 }
 
 // setHostIPOnPodSpec sets the environment variable HOST_IP using downward API
@@ -191,7 +192,14 @@ func setSelfHostedVolumesForScheduler(podSpec *v1.PodSpec) {
 	// This is not a problem with hostPath mounts as hostPath supports mounting one file only, instead of always a full directory. Secrets and Projected Volumes
 	// don't support that.
 	podSpec.Containers[0].Command = kubeadmutil.ReplaceArgument(podSpec.Containers[0].Command, func(argMap map[string]string) map[string]string {
-		argMap["kubeconfig"] = filepath.Join(selfHostedKubeConfigDir, kubeadmconstants.SchedulerKubeConfigFileName)
+		schedulerKubeConfigPath := filepath.Join(selfHostedKubeConfigDir, kubeadmconstants.SchedulerKubeConfigFileName)
+		argMap["kubeconfig"] = schedulerKubeConfigPath
+		if _, ok := argMap["authentication-kubeconfig"]; ok {
+			argMap["authentication-kubeconfig"] = schedulerKubeConfigPath
+		}
+		if _, ok := argMap["authorization-kubeconfig"]; ok {
+			argMap["authorization-kubeconfig"] = schedulerKubeConfigPath
+		}
 		return argMap
 	})
 }

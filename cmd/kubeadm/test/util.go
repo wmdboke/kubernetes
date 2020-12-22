@@ -95,11 +95,11 @@ func SetupEmptyFiles(t *testing.T, tmpdir string, fileNames ...string) {
 	}
 }
 
-// SetupPkiDirWithCertificateAuthorithy is a utility function for kubeadm testing that creates a
-// CertificateAuthorithy cert/key pair into /pki subfolder of a given temporary directory.
+// SetupPkiDirWithCertificateAuthority is a utility function for kubeadm testing that creates a
+// CertificateAuthority cert/key pair into /pki subfolder of a given temporary directory.
 // The function returns the path of the created pki.
-func SetupPkiDirWithCertificateAuthorithy(t *testing.T, tmpdir string) string {
-	caCert, caKey := certtestutil.SetupCertificateAuthorithy(t)
+func SetupPkiDirWithCertificateAuthority(t *testing.T, tmpdir string) string {
+	caCert, caKey := certtestutil.SetupCertificateAuthority(t)
 
 	certDir := filepath.Join(tmpdir, "pki")
 	if err := pkiutil.WriteCertAndKey(certDir, kubeadmconstants.CACertAndKeyBaseName, caCert, caKey); err != nil {
@@ -157,7 +157,7 @@ func AssertError(t *testing.T, err error, expected string) {
 
 // GetDefaultInternalConfig returns a defaulted kubeadmapi.InitConfiguration
 func GetDefaultInternalConfig(t *testing.T) *kubeadmapi.InitConfiguration {
-	internalcfg, err := configutil.DefaultedInitConfiguration(&kubeadmapiv1beta2.InitConfiguration{})
+	internalcfg, err := configutil.DefaultedInitConfiguration(&kubeadmapiv1beta2.InitConfiguration{}, &kubeadmapiv1beta2.ClusterConfiguration{})
 	if err != nil {
 		t.Fatalf("unexpected error getting default config: %v", err)
 	}

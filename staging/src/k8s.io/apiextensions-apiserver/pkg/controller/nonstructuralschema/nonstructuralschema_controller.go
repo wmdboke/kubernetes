@@ -17,7 +17,9 @@ limitations under the License.
 package nonstructuralschema
 
 import (
+	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -27,13 +29,15 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
-	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
+	apiextensionshelpers "k8s.io/apiextensions-apiserver/pkg/apihelpers"
+	apiextensionsinternal "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apiextensions-apiserver/pkg/apiserver/schema"
-	client "k8s.io/apiextensions-apiserver/pkg/client/clientset/internalclientset/typed/apiextensions/internalversion"
-	informers "k8s.io/apiextensions-apiserver/pkg/client/informers/internalversion/apiextensions/internalversion"
-	listers "k8s.io/apiextensions-apiserver/pkg/client/listers/apiextensions/internalversion"
+	client "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1"
+	informers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions/apiextensions/v1"
+	listers "k8s.io/apiextensions-apiserver/pkg/client/listers/apiextensions/v1"
 )
 
 // ConditionController is maintaining the NonStructuralSchema condition.
@@ -47,6 +51,11 @@ type ConditionController struct {
 	syncFn func(key string) error
 
 	queue workqueue.RateLimitingInterface
+
+	// last generation this controller updated the condition per CRD name (to avoid two
+	// different version of the apiextensions-apiservers in HA to fight for the right message)
+	lastSeenGenerationLock sync.Mutex
+	lastSeenGeneration     map[string]int64
 }
 
 // NewConditionController constructs a non-structural schema condition controller.
@@ -55,16 +64,17 @@ func NewConditionController(
 	crdClient client.CustomResourceDefinitionsGetter,
 ) *ConditionController {
 	c := &ConditionController{
-		crdClient: crdClient,
-		crdLister: crdInformer.Lister(),
-		crdSynced: crdInformer.Informer().HasSynced,
-		queue:     workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "non_structural_schema_condition_controller"),
+		crdClient:          crdClient,
+		crdLister:          crdInformer.Lister(),
+		crdSynced:          crdInformer.Informer().HasSynced,
+		queue:              workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "non_structural_schema_condition_controller"),
+		lastSeenGeneration: map[string]int64{},
 	}
 
 	crdInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    c.addCustomResourceDefinition,
 		UpdateFunc: c.updateCustomResourceDefinition,
-		DeleteFunc: nil,
+		DeleteFunc: c.deleteCustomResourceDefinition,
 	})
 
 	c.syncFn = c.sync
@@ -72,49 +82,47 @@ func NewConditionController(
 	return c
 }
 
-func calculateCondition(in *apiextensions.CustomResourceDefinition) *apiextensions.CustomResourceDefinitionCondition {
-	cond := &apiextensions.CustomResourceDefinitionCondition{
-		Type:   apiextensions.NonStructuralSchema,
-		Status: apiextensions.ConditionUnknown,
+func calculateCondition(in *apiextensionsv1.CustomResourceDefinition) *apiextensionsv1.CustomResourceDefinitionCondition {
+	cond := &apiextensionsv1.CustomResourceDefinitionCondition{
+		Type:   apiextensionsv1.NonStructuralSchema,
+		Status: apiextensionsv1.ConditionUnknown,
 	}
 
 	allErrs := field.ErrorList{}
 
-	if in.Spec.Validation != nil && in.Spec.Validation.OpenAPIV3Schema != nil {
-		s, err := schema.NewStructural(in.Spec.Validation.OpenAPIV3Schema)
-		if err != nil {
-			cond.Reason = "StructuralError"
-			cond.Message = fmt.Sprintf("failed to check global validation schema: %v", err)
-			return cond
-		}
-
-		pth := field.NewPath("spec", "validation", "openAPIV3Schema")
-
-		allErrs = append(allErrs, schema.ValidateStructural(s, pth)...)
+	if in.Spec.PreserveUnknownFields {
+		allErrs = append(allErrs, field.Invalid(field.NewPath("spec", "preserveUnknownFields"),
+			in.Spec.PreserveUnknownFields,
+			fmt.Sprint("must be false")))
 	}
 
-	for _, v := range in.Spec.Versions {
+	for i, v := range in.Spec.Versions {
 		if v.Schema == nil || v.Schema.OpenAPIV3Schema == nil {
 			continue
 		}
 
-		s, err := schema.NewStructural(v.Schema.OpenAPIV3Schema)
+		internalSchema := &apiextensionsinternal.CustomResourceValidation{}
+		if err := apiextensionsv1.Convert_v1_CustomResourceValidation_To_apiextensions_CustomResourceValidation(v.Schema, internalSchema, nil); err != nil {
+			klog.Errorf("failed to convert CRD validation to internal version: %v", err)
+			continue
+		}
+		s, err := schema.NewStructural(internalSchema.OpenAPIV3Schema)
 		if err != nil {
 			cond.Reason = "StructuralError"
 			cond.Message = fmt.Sprintf("failed to check validation schema for version %s: %v", v.Name, err)
 			return cond
 		}
 
-		pth := field.NewPath("spec", "version").Key(v.Name).Child("schema", "openAPIV3Schema")
+		pth := field.NewPath("spec", "versions").Index(i).Child("schema", "openAPIV3Schema")
 
-		allErrs = append(allErrs, schema.ValidateStructural(s, pth)...)
+		allErrs = append(allErrs, schema.ValidateStructural(pth, s)...)
 	}
 
 	if len(allErrs) == 0 {
 		return nil
 	}
 
-	cond.Status = apiextensions.ConditionTrue
+	cond.Status = apiextensionsv1.ConditionTrue
 	cond.Reason = "Violations"
 	cond.Message = allErrs.ToAggregate().Error()
 
@@ -130,9 +138,17 @@ func (c *ConditionController) sync(key string) error {
 		return err
 	}
 
+	// avoid repeated calculation for the same generation
+	c.lastSeenGenerationLock.Lock()
+	lastSeen, seenBefore := c.lastSeenGeneration[inCustomResourceDefinition.Name]
+	c.lastSeenGenerationLock.Unlock()
+	if seenBefore && inCustomResourceDefinition.Generation <= lastSeen {
+		return nil
+	}
+
 	// check old condition
 	cond := calculateCondition(inCustomResourceDefinition)
-	old := apiextensions.FindCRDCondition(inCustomResourceDefinition, apiextensions.NonStructuralSchema)
+	old := apiextensionshelpers.FindCRDCondition(inCustomResourceDefinition, apiextensionsv1.NonStructuralSchema)
 
 	if cond == nil && old == nil {
 		return nil
@@ -144,13 +160,13 @@ func (c *ConditionController) sync(key string) error {
 	// update condition
 	crd := inCustomResourceDefinition.DeepCopy()
 	if cond == nil {
-		apiextensions.RemoveCRDCondition(crd, apiextensions.NonStructuralSchema)
+		apiextensionshelpers.RemoveCRDCondition(crd, apiextensionsv1.NonStructuralSchema)
 	} else {
 		cond.LastTransitionTime = metav1.NewTime(time.Now())
-		apiextensions.SetCRDCondition(crd, *cond)
+		apiextensionshelpers.SetCRDCondition(crd, *cond)
 	}
 
-	_, err = c.crdClient.CustomResourceDefinitions().UpdateStatus(crd)
+	_, err = c.crdClient.CustomResourceDefinitions().UpdateStatus(context.TODO(), crd, metav1.UpdateOptions{})
 	if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
 		// deleted or changed in the meantime, we'll get called again
 		return nil
@@ -158,6 +174,12 @@ func (c *ConditionController) sync(key string) error {
 	if err != nil {
 		return err
 	}
+
+	// store generation in order to avoid repeated updates for the same generation (and potential
+	// fights of API server in HA environments).
+	c.lastSeenGenerationLock.Lock()
+	defer c.lastSeenGenerationLock.Unlock()
+	c.lastSeenGeneration[crd.Name] = crd.Generation
 
 	return nil
 }
@@ -206,10 +228,10 @@ func (c *ConditionController) processNextWorkItem() bool {
 	return true
 }
 
-func (c *ConditionController) enqueue(obj *apiextensions.CustomResourceDefinition) {
+func (c *ConditionController) enqueue(obj *apiextensionsv1.CustomResourceDefinition) {
 	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 	if err != nil {
-		utilruntime.HandleError(fmt.Errorf("Couldn't get key for object %#v: %v", obj, err))
+		utilruntime.HandleError(fmt.Errorf("couldn't get key for object %#v: %v", obj, err))
 		return
 	}
 
@@ -217,13 +239,33 @@ func (c *ConditionController) enqueue(obj *apiextensions.CustomResourceDefinitio
 }
 
 func (c *ConditionController) addCustomResourceDefinition(obj interface{}) {
-	castObj := obj.(*apiextensions.CustomResourceDefinition)
+	castObj := obj.(*apiextensionsv1.CustomResourceDefinition)
 	klog.V(4).Infof("Adding %s", castObj.Name)
 	c.enqueue(castObj)
 }
 
 func (c *ConditionController) updateCustomResourceDefinition(obj, _ interface{}) {
-	castObj := obj.(*apiextensions.CustomResourceDefinition)
+	castObj := obj.(*apiextensionsv1.CustomResourceDefinition)
 	klog.V(4).Infof("Updating %s", castObj.Name)
 	c.enqueue(castObj)
+}
+
+func (c *ConditionController) deleteCustomResourceDefinition(obj interface{}) {
+	castObj, ok := obj.(*apiextensionsv1.CustomResourceDefinition)
+	if !ok {
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			klog.Errorf("Couldn't get object from tombstone %#v", obj)
+			return
+		}
+		castObj, ok = tombstone.Obj.(*apiextensionsv1.CustomResourceDefinition)
+		if !ok {
+			klog.Errorf("Tombstone contained object that is not expected %#v", obj)
+			return
+		}
+	}
+
+	c.lastSeenGenerationLock.Lock()
+	defer c.lastSeenGenerationLock.Unlock()
+	delete(c.lastSeenGeneration, castObj.Name)
 }

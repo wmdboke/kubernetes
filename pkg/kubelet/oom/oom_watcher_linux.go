@@ -19,46 +19,66 @@ limitations under the License.
 package oom
 
 import (
-	"k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"fmt"
+
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"github.com/google/cadvisor/utils/oomparser"
 )
 
-type realOOMWatcher struct {
-	recorder record.EventRecorder
+type streamer interface {
+	StreamOoms(chan<- *oomparser.OomInstance)
 }
 
-var _ OOMWatcher = &realOOMWatcher{}
+var _ streamer = &oomparser.OomParser{}
 
-// NewOOMWatcher creates and initializes a OOMWatcher based on parameters.
-func NewOOMWatcher(recorder record.EventRecorder) OOMWatcher {
-	return &realOOMWatcher{
-		recorder: recorder,
-	}
+type realWatcher struct {
+	recorder    record.EventRecorder
+	oomStreamer streamer
 }
 
-const systemOOMEvent = "SystemOOM"
+var _ Watcher = &realWatcher{}
 
-// Watches for system oom's and records an event for every system oom encountered.
-func (ow *realOOMWatcher) Start(ref *v1.ObjectReference) error {
-	oomLog, err := oomparser.New()
+// NewWatcher creates and initializes a OOMWatcher backed by Cadvisor as
+// the oom streamer.
+func NewWatcher(recorder record.EventRecorder) (Watcher, error) {
+	oomStreamer, err := oomparser.New()
 	if err != nil {
-		return err
+		return nil, err
 	}
+
+	watcher := &realWatcher{
+		recorder:    recorder,
+		oomStreamer: oomStreamer,
+	}
+
+	return watcher, nil
+}
+
+const (
+	systemOOMEvent           = "SystemOOM"
+	recordEventContainerName = "/"
+)
+
+// Start watches for system oom's and records an event for every system oom encountered.
+func (ow *realWatcher) Start(ref *v1.ObjectReference) error {
 	outStream := make(chan *oomparser.OomInstance, 10)
-	go oomLog.StreamOoms(outStream)
+	go ow.oomStreamer.StreamOoms(outStream)
 
 	go func() {
 		defer runtime.HandleCrash()
 
 		for event := range outStream {
-			if event.ContainerName == "/" {
+			if event.VictimContainerName == recordEventContainerName {
 				klog.V(1).Infof("Got sys oom event: %v", event)
-				ow.recorder.PastEventf(ref, metav1.Time{Time: event.TimeOfDeath}, v1.EventTypeWarning, systemOOMEvent, "System OOM encountered")
+				eventMsg := "System OOM encountered"
+				if event.ProcessName != "" && event.Pid != 0 {
+					eventMsg = fmt.Sprintf("%s, victim process: %s, pid: %d", eventMsg, event.ProcessName, event.Pid)
+				}
+				ow.recorder.Eventf(ref, v1.EventTypeWarning, systemOOMEvent, eventMsg)
 			}
 		}
 		klog.Errorf("Unexpectedly stopped receiving OOM notifications")

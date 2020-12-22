@@ -26,12 +26,17 @@ import (
 )
 
 var (
+	// FakeVersion is a version of a fake runtime.
 	FakeVersion = "0.1.0"
 
-	FakeRuntimeName  = "fakeRuntime"
-	FakePodSandboxIP = "192.168.192.168"
+	// FakeRuntimeName is the name of the fake runtime.
+	FakeRuntimeName = "fakeRuntime"
+
+	// FakePodSandboxIPs is an IP address of the fake runtime.
+	FakePodSandboxIPs = []string{"192.168.192.168"}
 )
 
+// FakePodSandbox is the fake implementation of runtimeapi.PodSandboxStatus.
 type FakePodSandbox struct {
 	// PodSandboxStatus contains the runtime information for a sandbox.
 	runtimeapi.PodSandboxStatus
@@ -39,14 +44,19 @@ type FakePodSandbox struct {
 	RuntimeHandler string
 }
 
+// FakeContainer is a fake container.
 type FakeContainer struct {
 	// ContainerStatus contains the runtime information for a container.
 	runtimeapi.ContainerStatus
+
+	// LinuxResources contains the resources specific to linux containers.
+	LinuxResources *runtimeapi.LinuxContainerResources
 
 	// the sandbox id of this container
 	SandboxID string
 }
 
+// FakeRuntimeService is a fake runetime service.
 type FakeRuntimeService struct {
 	sync.Mutex
 
@@ -59,6 +69,7 @@ type FakeRuntimeService struct {
 	FakeContainerStats map[string]*runtimeapi.ContainerStats
 }
 
+// GetContainerID returns the unique container ID from the FakeRuntimeService.
 func (r *FakeRuntimeService) GetContainerID(sandboxID, name string, attempt uint32) (string, error) {
 	r.Lock()
 	defer r.Unlock()
@@ -71,6 +82,7 @@ func (r *FakeRuntimeService) GetContainerID(sandboxID, name string, attempt uint
 	return "", fmt.Errorf("container (name, attempt, sandboxID)=(%q, %d, %q) not found", name, attempt, sandboxID)
 }
 
+// SetFakeSandboxes sets the fake sandboxes for the FakeRuntimeService.
 func (r *FakeRuntimeService) SetFakeSandboxes(sandboxes []*FakePodSandbox) {
 	r.Lock()
 	defer r.Unlock()
@@ -82,6 +94,7 @@ func (r *FakeRuntimeService) SetFakeSandboxes(sandboxes []*FakePodSandbox) {
 	}
 }
 
+// SetFakeContainers sets fake containers for the FakeRuntimeService.
 func (r *FakeRuntimeService) SetFakeContainers(containers []*FakeContainer) {
 	r.Lock()
 	defer r.Unlock()
@@ -94,6 +107,7 @@ func (r *FakeRuntimeService) SetFakeContainers(containers []*FakeContainer) {
 
 }
 
+// AssertCalls validates whether specified calls were made to the FakeRuntimeService.
 func (r *FakeRuntimeService) AssertCalls(calls []string) error {
 	r.Lock()
 	defer r.Unlock()
@@ -104,12 +118,14 @@ func (r *FakeRuntimeService) AssertCalls(calls []string) error {
 	return nil
 }
 
+// GetCalls returns the list of calls made to the FakeRuntimeService.
 func (r *FakeRuntimeService) GetCalls() []string {
 	r.Lock()
 	defer r.Unlock()
 	return append([]string{}, r.Called...)
 }
 
+// InjectError inject the error to the next call to the FakeRuntimeService.
 func (r *FakeRuntimeService) InjectError(f string, err error) {
 	r.Lock()
 	defer r.Unlock()
@@ -126,9 +142,11 @@ func (r *FakeRuntimeService) popError(f string) error {
 		return nil
 	}
 	err, errs := errs[0], errs[1:]
+	r.Errors[f] = errs
 	return err
 }
 
+// NewFakeRuntimeService creates a new FakeRuntimeService.
 func NewFakeRuntimeService() *FakeRuntimeService {
 	return &FakeRuntimeService{
 		Called:             make([]string, 0),
@@ -139,11 +157,15 @@ func NewFakeRuntimeService() *FakeRuntimeService {
 	}
 }
 
+// Version returns version information from the FakeRuntimeService.
 func (r *FakeRuntimeService) Version(apiVersion string) (*runtimeapi.VersionResponse, error) {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "Version")
+	if err := r.popError("Version"); err != nil {
+		return nil, err
+	}
 
 	return &runtimeapi.VersionResponse{
 		Version:           FakeVersion,
@@ -153,20 +175,28 @@ func (r *FakeRuntimeService) Version(apiVersion string) (*runtimeapi.VersionResp
 	}, nil
 }
 
+// Status returns runtime status of the FakeRuntimeService.
 func (r *FakeRuntimeService) Status() (*runtimeapi.RuntimeStatus, error) {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "Status")
+	if err := r.popError("Status"); err != nil {
+		return nil, err
+	}
 
 	return r.FakeStatus, nil
 }
 
+// RunPodSandbox emulates the run of the pod sandbox in the FakeRuntimeService.
 func (r *FakeRuntimeService) RunPodSandbox(config *runtimeapi.PodSandboxConfig, runtimeHandler string) (string, error) {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "RunPodSandbox")
+	if err := r.popError("RunPodSandbox"); err != nil {
+		return "", err
+	}
 
 	// PodSandboxID should be randomized for real container runtime, but here just use
 	// fixed name from BuildSandboxName() for easily making fake sandboxes.
@@ -179,7 +209,15 @@ func (r *FakeRuntimeService) RunPodSandbox(config *runtimeapi.PodSandboxConfig, 
 			State:     runtimeapi.PodSandboxState_SANDBOX_READY,
 			CreatedAt: createdAt,
 			Network: &runtimeapi.PodSandboxNetworkStatus{
-				Ip: FakePodSandboxIP,
+				Ip: FakePodSandboxIPs[0],
+			},
+			// Without setting sandboxStatus's Linux.Namespaces.Options, kubeGenericRuntimeManager's podSandboxChanged will consider it as network
+			// namespace changed and always recreate sandbox which causes pod creation failed.
+			// Ref `sandboxStatus.GetLinux().GetNamespaces().GetOptions().GetNetwork() != networkNamespaceForPod(pod)` in podSandboxChanged function.
+			Linux: &runtimeapi.LinuxPodSandboxStatus{
+				Namespaces: &runtimeapi.Namespace{
+					Options: config.GetLinux().GetSecurityContext().GetNamespaceOptions(),
+				},
 			},
 			Labels:         config.Labels,
 			Annotations:    config.Annotations,
@@ -187,15 +225,27 @@ func (r *FakeRuntimeService) RunPodSandbox(config *runtimeapi.PodSandboxConfig, 
 		},
 		RuntimeHandler: runtimeHandler,
 	}
-
+	// assign additional IPs
+	additionalIPs := FakePodSandboxIPs[1:]
+	additionalPodIPs := make([]*runtimeapi.PodIP, 0, len(additionalIPs))
+	for _, ip := range additionalIPs {
+		additionalPodIPs = append(additionalPodIPs, &runtimeapi.PodIP{
+			Ip: ip,
+		})
+	}
+	r.Sandboxes[podSandboxID].PodSandboxStatus.Network.AdditionalIps = additionalPodIPs
 	return podSandboxID, nil
 }
 
+// StopPodSandbox emulates the stop of pod sandbox in the FakeRuntimeService.
 func (r *FakeRuntimeService) StopPodSandbox(podSandboxID string) error {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "StopPodSandbox")
+	if err := r.popError("StopPodSandbox"); err != nil {
+		return err
+	}
 
 	if s, ok := r.Sandboxes[podSandboxID]; ok {
 		s.State = runtimeapi.PodSandboxState_SANDBOX_NOTREADY
@@ -206,11 +256,15 @@ func (r *FakeRuntimeService) StopPodSandbox(podSandboxID string) error {
 	return nil
 }
 
+// RemovePodSandbox emulates removal of the pod sadbox in the FakeRuntimeService.
 func (r *FakeRuntimeService) RemovePodSandbox(podSandboxID string) error {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "RemovePodSandbox")
+	if err := r.popError("RemovePodSandbox"); err != nil {
+		return err
+	}
 
 	// Remove the pod sandbox
 	delete(r.Sandboxes, podSandboxID)
@@ -218,11 +272,15 @@ func (r *FakeRuntimeService) RemovePodSandbox(podSandboxID string) error {
 	return nil
 }
 
+// PodSandboxStatus returns pod sandbox status from the FakeRuntimeService.
 func (r *FakeRuntimeService) PodSandboxStatus(podSandboxID string) (*runtimeapi.PodSandboxStatus, error) {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "PodSandboxStatus")
+	if err := r.popError("PodSandboxStatus"); err != nil {
+		return nil, err
+	}
 
 	s, ok := r.Sandboxes[podSandboxID]
 	if !ok {
@@ -233,11 +291,15 @@ func (r *FakeRuntimeService) PodSandboxStatus(podSandboxID string) (*runtimeapi.
 	return &status, nil
 }
 
+// ListPodSandbox returns the list of pod sandboxes in the FakeRuntimeService.
 func (r *FakeRuntimeService) ListPodSandbox(filter *runtimeapi.PodSandboxFilter) ([]*runtimeapi.PodSandbox, error) {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "ListPodSandbox")
+	if err := r.popError("ListPodSandbox"); err != nil {
+		return nil, err
+	}
 
 	result := make([]*runtimeapi.PodSandbox, 0)
 	for id, s := range r.Sandboxes {
@@ -267,19 +329,28 @@ func (r *FakeRuntimeService) ListPodSandbox(filter *runtimeapi.PodSandboxFilter)
 	return result, nil
 }
 
+// PortForward emulates the set up of port forward in the FakeRuntimeService.
 func (r *FakeRuntimeService) PortForward(*runtimeapi.PortForwardRequest) (*runtimeapi.PortForwardResponse, error) {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "PortForward")
+	if err := r.popError("PortForward"); err != nil {
+		return nil, err
+	}
+
 	return &runtimeapi.PortForwardResponse{}, nil
 }
 
+// CreateContainer emulates container creation in the FakeRuntimeService.
 func (r *FakeRuntimeService) CreateContainer(podSandboxID string, config *runtimeapi.ContainerConfig, sandboxConfig *runtimeapi.PodSandboxConfig) (string, error) {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "CreateContainer")
+	if err := r.popError("CreateContainer"); err != nil {
+		return "", err
+	}
 
 	// ContainerID should be randomized for real container runtime, but here just use
 	// fixed BuildContainerName() for easily making fake containers.
@@ -298,17 +369,22 @@ func (r *FakeRuntimeService) CreateContainer(podSandboxID string, config *runtim
 			Labels:      config.Labels,
 			Annotations: config.Annotations,
 		},
-		SandboxID: podSandboxID,
+		SandboxID:      podSandboxID,
+		LinuxResources: config.GetLinux().GetResources(),
 	}
 
 	return containerID, nil
 }
 
+// StartContainer emulates start of a container in the FakeRuntimeService.
 func (r *FakeRuntimeService) StartContainer(containerID string) error {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "StartContainer")
+	if err := r.popError("StartContainer"); err != nil {
+		return err
+	}
 
 	c, ok := r.Containers[containerID]
 	if !ok {
@@ -322,11 +398,15 @@ func (r *FakeRuntimeService) StartContainer(containerID string) error {
 	return nil
 }
 
+// StopContainer emulates stop of a container in the FakeRuntimeService.
 func (r *FakeRuntimeService) StopContainer(containerID string, timeout int64) error {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "StopContainer")
+	if err := r.popError("StopContainer"); err != nil {
+		return err
+	}
 
 	c, ok := r.Containers[containerID]
 	if !ok {
@@ -342,11 +422,15 @@ func (r *FakeRuntimeService) StopContainer(containerID string, timeout int64) er
 	return nil
 }
 
+// RemoveContainer emulates remove of a container in the FakeRuntimeService.
 func (r *FakeRuntimeService) RemoveContainer(containerID string) error {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "RemoveContainer")
+	if err := r.popError("RemoveContainer"); err != nil {
+		return err
+	}
 
 	// Remove the container
 	delete(r.Containers, containerID)
@@ -354,11 +438,15 @@ func (r *FakeRuntimeService) RemoveContainer(containerID string) error {
 	return nil
 }
 
+// ListContainers returns the list of containers in the FakeRuntimeService.
 func (r *FakeRuntimeService) ListContainers(filter *runtimeapi.ContainerFilter) ([]*runtimeapi.Container, error) {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "ListContainers")
+	if err := r.popError("ListContainers"); err != nil {
+		return nil, err
+	}
 
 	result := make([]*runtimeapi.Container, 0)
 	for _, s := range r.Containers {
@@ -393,11 +481,15 @@ func (r *FakeRuntimeService) ListContainers(filter *runtimeapi.ContainerFilter) 
 	return result, nil
 }
 
+// ContainerStatus returns the container status given the container ID in FakeRuntimeService.
 func (r *FakeRuntimeService) ContainerStatus(containerID string) (*runtimeapi.ContainerStatus, error) {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "ContainerStatus")
+	if err := r.popError("ContainerStatus"); err != nil {
+		return nil, err
+	}
 
 	c, ok := r.Containers[containerID]
 	if !ok {
@@ -408,42 +500,61 @@ func (r *FakeRuntimeService) ContainerStatus(containerID string) (*runtimeapi.Co
 	return &status, nil
 }
 
+// UpdateContainerResources returns the container resource in the FakeRuntimeService.
 func (r *FakeRuntimeService) UpdateContainerResources(string, *runtimeapi.LinuxContainerResources) error {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "UpdateContainerResources")
-	return nil
+	return r.popError("UpdateContainerResources")
 }
 
+// ExecSync emulates the sync execution of a command in a container in the FakeRuntimeService.
 func (r *FakeRuntimeService) ExecSync(containerID string, cmd []string, timeout time.Duration) (stdout []byte, stderr []byte, err error) {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "ExecSync")
-	return nil, nil, nil
+	err = r.popError("ExecSync")
+	return
 }
 
+// Exec emulates the execution of a command in a container in the FakeRuntimeService.
 func (r *FakeRuntimeService) Exec(*runtimeapi.ExecRequest) (*runtimeapi.ExecResponse, error) {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "Exec")
+	if err := r.popError("Exec"); err != nil {
+		return nil, err
+	}
+
 	return &runtimeapi.ExecResponse{}, nil
 }
 
+// Attach emulates the attach request in the FakeRuntimeService.
 func (r *FakeRuntimeService) Attach(req *runtimeapi.AttachRequest) (*runtimeapi.AttachResponse, error) {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "Attach")
+	if err := r.popError("Attach"); err != nil {
+		return nil, err
+	}
+
 	return &runtimeapi.AttachResponse{}, nil
 }
 
+// UpdateRuntimeConfig emulates the update of a runtime config for the FakeRuntimeService.
 func (r *FakeRuntimeService) UpdateRuntimeConfig(runtimeCOnfig *runtimeapi.RuntimeConfig) error {
-	return nil
+	r.Lock()
+	defer r.Unlock()
+
+	r.Called = append(r.Called, "UpdateRuntimeConfig")
+	return r.popError("UpdateRuntimeConfig")
 }
 
+// SetFakeContainerStats sets the fake container stats in the FakeRuntimeService.
 func (r *FakeRuntimeService) SetFakeContainerStats(containerStats []*runtimeapi.ContainerStats) {
 	r.Lock()
 	defer r.Unlock()
@@ -454,11 +565,15 @@ func (r *FakeRuntimeService) SetFakeContainerStats(containerStats []*runtimeapi.
 	}
 }
 
+// ContainerStats returns the container stats in the FakeRuntimeService.
 func (r *FakeRuntimeService) ContainerStats(containerID string) (*runtimeapi.ContainerStats, error) {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "ContainerStats")
+	if err := r.popError("ContainerStats"); err != nil {
+		return nil, err
+	}
 
 	s, found := r.FakeContainerStats[containerID]
 	if !found {
@@ -467,11 +582,15 @@ func (r *FakeRuntimeService) ContainerStats(containerID string) (*runtimeapi.Con
 	return s, nil
 }
 
+// ListContainerStats returns the list of all container stats given the filter in the FakeRuntimeService.
 func (r *FakeRuntimeService) ListContainerStats(filter *runtimeapi.ContainerStatsFilter) ([]*runtimeapi.ContainerStats, error) {
 	r.Lock()
 	defer r.Unlock()
 
 	r.Called = append(r.Called, "ListContainerStats")
+	if err := r.popError("ListContainerStats"); err != nil {
+		return nil, err
+	}
 
 	var result []*runtimeapi.ContainerStats
 	for _, c := range r.Containers {
@@ -496,6 +615,7 @@ func (r *FakeRuntimeService) ListContainerStats(filter *runtimeapi.ContainerStat
 	return result, nil
 }
 
+// ReopenContainerLog emulates call to the reopen container log in the FakeRuntimeService.
 func (r *FakeRuntimeService) ReopenContainerLog(containerID string) error {
 	r.Lock()
 	defer r.Unlock()

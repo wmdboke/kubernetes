@@ -21,10 +21,10 @@ import (
 	"strings"
 
 	"k8s.io/kubernetes/test/e2e/framework"
-	e2elog "k8s.io/kubernetes/test/e2e/framework/log"
+	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	e2essh "k8s.io/kubernetes/test/e2e/framework/ssh"
 
-	. "github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo"
 )
 
 const maxNodes = 100
@@ -33,18 +33,18 @@ var _ = SIGDescribe("SSH", func() {
 
 	f := framework.NewDefaultFramework("ssh")
 
-	BeforeEach(func() {
+	ginkgo.BeforeEach(func() {
 		// When adding more providers here, also implement their functionality in e2essh.GetSigner(...).
-		framework.SkipUnlessProviderIs(framework.ProvidersWithSSH...)
+		e2eskipper.SkipUnlessProviderIs(framework.ProvidersWithSSH...)
 
 		// This test SSH's into the node for which it needs the $HOME/.ssh/id_rsa key to be present. So
 		// we should skip if the environment does not have the key (not all CI systems support this use case)
-		framework.SkipUnlessSSHKeyPresent()
+		e2eskipper.SkipUnlessSSHKeyPresent()
 	})
 
-	It("should SSH to all nodes and run commands", func() {
+	ginkgo.It("should SSH to all nodes and run commands", func() {
 		// Get all nodes' external IPs.
-		By("Getting all nodes' SSH-able IP addresses")
+		ginkgo.By("Getting all nodes' SSH-able IP addresses")
 		hosts, err := e2essh.NodeSSHHosts(f.ClientSet)
 		if err != nil {
 			framework.Failf("Error getting node hostnames: %v", err)
@@ -76,7 +76,7 @@ var _ = SIGDescribe("SSH", func() {
 				nodes = maxNodes
 			}
 			testhosts := hosts[:nodes]
-			By(fmt.Sprintf("SSH'ing to %d nodes and running %s", len(testhosts), testCase.cmd))
+			ginkgo.By(fmt.Sprintf("SSH'ing to %d nodes and running %s", len(testhosts), testCase.cmd))
 
 			for _, host := range testhosts {
 				result, err := e2essh.SSH(testCase.cmd, host, framework.TestContext.Provider)
@@ -95,16 +95,16 @@ var _ = SIGDescribe("SSH", func() {
 				}
 				// Show stdout, stderr for logging purposes.
 				if len(stdout) > 0 {
-					e2elog.Logf("Got stdout from %s: %s", host, strings.TrimSpace(stdout))
+					framework.Logf("Got stdout from %s: %s", host, strings.TrimSpace(stdout))
 				}
 				if len(stderr) > 0 {
-					e2elog.Logf("Got stderr from %s: %s", host, strings.TrimSpace(stderr))
+					framework.Logf("Got stderr from %s: %s", host, strings.TrimSpace(stderr))
 				}
 			}
 		}
 
 		// Quickly test that SSH itself errors correctly.
-		By("SSH'ing to a nonexistent host")
+		ginkgo.By("SSH'ing to a nonexistent host")
 		if _, err = e2essh.SSH(`echo "hello"`, "i.do.not.exist", framework.TestContext.Provider); err == nil {
 			framework.Failf("Expected error trying to SSH to nonexistent host.")
 		}

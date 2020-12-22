@@ -23,12 +23,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/kubernetes/test/e2e/framework"
-	e2elog "k8s.io/kubernetes/test/e2e/framework/log"
-	e2essh "k8s.io/kubernetes/test/e2e/framework/ssh"
+	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
+	"k8s.io/kubernetes/test/e2e/storage/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
+	"github.com/onsi/ginkgo"
 )
 
 func preparePod(name string, node *v1.Node, propagation *v1.MountPropagationMode, hostDir string) *v1.Pod {
@@ -80,21 +79,23 @@ func preparePod(name string, node *v1.Node, propagation *v1.MountPropagationMode
 var _ = SIGDescribe("Mount propagation", func() {
 	f := framework.NewDefaultFramework("mount-propagation")
 
-	It("should propagate mounts to the host", func() {
+	ginkgo.It("should propagate mounts to the host", func() {
 		// This test runs two pods: master and slave with respective mount
 		// propagation on common /var/lib/kubelet/XXXX directory. Both mount a
 		// tmpfs to a subdirectory there. We check that these mounts are
 		// propagated to the right places.
 
+		hostExec := utils.NewHostExec(f)
+		defer hostExec.Cleanup()
+
 		// Pick a node where all pods will run.
-		nodes := framework.GetReadySchedulableNodesOrDie(f.ClientSet)
-		Expect(len(nodes.Items)).NotTo(BeZero(), "No available nodes for scheduling")
-		node := &nodes.Items[0]
+		node, err := e2enode.GetRandomReadySchedulableNode(f.ClientSet)
+		framework.ExpectNoError(err)
 
 		// Fail the test if the namespace is not set. We expect that the
 		// namespace is unique and we might delete user data if it's not.
 		if len(f.Namespace.Name) == 0 {
-			Expect(f.Namespace.Name).ToNot(Equal(""))
+			framework.ExpectNotEqual(f.Namespace.Name, "")
 			return
 		}
 
@@ -103,8 +104,8 @@ var _ = SIGDescribe("Mount propagation", func() {
 		// running in parallel.
 		hostDir := "/var/lib/kubelet/" + f.Namespace.Name
 		defer func() {
-			cleanCmd := fmt.Sprintf("sudo rm -rf %q", hostDir)
-			e2essh.IssueSSHCommand(cleanCmd, framework.TestContext.Provider, node)
+			cleanCmd := fmt.Sprintf("rm -rf %q", hostDir)
+			hostExec.IssueCommand(cleanCmd, node)
 		}()
 
 		podClient := f.PodClient()
@@ -140,13 +141,13 @@ var _ = SIGDescribe("Mount propagation", func() {
 
 		// The host mounts one tmpfs to testdir/host and puts a file there so we
 		// can check mount propagation from the host to pods.
-		cmd := fmt.Sprintf("sudo mkdir %[1]q/host; sudo mount -t tmpfs e2e-mount-propagation-host %[1]q/host; echo host > %[1]q/host/file", hostDir)
-		err := e2essh.IssueSSHCommand(cmd, framework.TestContext.Provider, node)
+		cmd := fmt.Sprintf("mkdir %[1]q/host; mount -t tmpfs e2e-mount-propagation-host %[1]q/host; echo host > %[1]q/host/file", hostDir)
+		err = hostExec.IssueCommand(cmd, node)
 		framework.ExpectNoError(err)
 
 		defer func() {
-			cmd := fmt.Sprintf("sudo umount %q/host", hostDir)
-			e2essh.IssueSSHCommand(cmd, framework.TestContext.Provider, node)
+			cmd := fmt.Sprintf("umount %q/host", hostDir)
+			hostExec.IssueCommand(cmd, node)
 		}()
 
 		// Now check that mounts are propagated to the right containers.
@@ -167,27 +168,27 @@ var _ = SIGDescribe("Mount propagation", func() {
 			for _, mountName := range dirNames {
 				cmd := fmt.Sprintf("cat /mnt/test/%s/file", mountName)
 				stdout, stderr, err := f.ExecShellInPodWithFullOutput(podName, cmd)
-				e2elog.Logf("pod %s mount %s: stdout: %q, stderr: %q error: %v", podName, mountName, stdout, stderr, err)
+				framework.Logf("pod %s mount %s: stdout: %q, stderr: %q error: %v", podName, mountName, stdout, stderr, err)
 				msg := fmt.Sprintf("When checking pod %s and directory %s", podName, mountName)
 				shouldBeVisible := mounts.Has(mountName)
 				if shouldBeVisible {
 					framework.ExpectNoError(err, "%s: failed to run %q", msg, cmd)
-					Expect(stdout).To(Equal(mountName), msg)
+					framework.ExpectEqual(stdout, mountName, msg)
 				} else {
 					// We *expect* cat to return error here
-					Expect(err).To(HaveOccurred(), msg)
+					framework.ExpectError(err, msg)
 				}
 			}
 		}
 		// Check that the mounts are/are not propagated to the host.
 		// Host can see mount from master
 		cmd = fmt.Sprintf("test `cat %q/master/file` = master", hostDir)
-		err = e2essh.IssueSSHCommand(cmd, framework.TestContext.Provider, node)
+		err = hostExec.IssueCommand(cmd, node)
 		framework.ExpectNoError(err, "host should see mount from master")
 
 		// Host can't see mount from slave
 		cmd = fmt.Sprintf("test ! -e %q/slave/file", hostDir)
-		err = e2essh.IssueSSHCommand(cmd, framework.TestContext.Provider, node)
+		err = hostExec.IssueCommand(cmd, node)
 		framework.ExpectNoError(err, "host shouldn't see mount from slave")
 	})
 })

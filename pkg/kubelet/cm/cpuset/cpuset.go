@@ -19,7 +19,7 @@ package cpuset
 import (
 	"bytes"
 	"fmt"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	"reflect"
 	"sort"
 	"strconv"
@@ -185,6 +185,16 @@ func (s CPUSet) ToSlice() []int {
 		result = append(result, cpu)
 	}
 	sort.Ints(result)
+	return result
+}
+
+// ToSliceNoSort returns a slice of integers that contains all elements from
+// this set.
+func (s CPUSet) ToSliceNoSort() []int {
+	result := []int{}
+	for cpu := range s.elems {
+		result = append(result, cpu)
+	}
 	return result
 }
 
